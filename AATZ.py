@@ -11,15 +11,16 @@ from folium.plugins import MarkerCluster
 import pandas as pd
 from io import BytesIO
 import random
+import math
 
-def generate_random_points_grid_based(polygon, grid_size=5):
+def generate_random_points_with_min_distance(polygon, min_distance=5, k=30):
     """
-    Ģenerē nejaušus punktus poligona iekšpusē, izmantojot grīdas bāzētu metodi.
-    Katras grīdas šūnas pārklājumā ar poligonu tiek ģenerēts viens nejaušs punkts.
+    Ģenerē nejaušus punktus poligona iekšpusē, nodrošinot, ka attālums starp jebkuriem diviem punktiem nepārsniedz min_distance.
 
     Args:
         polygon (shapely.geometry.Polygon or MultiPolygon): Poligons, iekšā kurā ģenerēt punktus.
-        grid_size (float): Grīdas šūnas izmērs metriem.
+        min_distance (float): Minimālais attālums starp punktiem metriem.
+        k (int): Maksimālais mēģinājumu skaits, lai atrastu jaunu punktu.
 
     Returns:
         list of shapely.geometry.Point: Saraksts ar ģenerētajiem punktiem.
@@ -34,36 +35,28 @@ def generate_random_points_grid_based(polygon, grid_size=5):
 
     for poly in polygons:
         minx, miny, maxx, maxy = poly.bounds
-        # Izveidojam grīdas šūnu koordinātas
-        x_coords = np.arange(minx, maxx, grid_size)
-        y_coords = np.arange(miny, maxy, grid_size)
-        for x in x_coords:
-            for y in y_coords:
-                # Izveidojam grīdas šūnu kā poligonu
-                grid_cell = Polygon([
-                    (x, y),
-                    (x + grid_size, y),
-                    (x + grid_size, y + grid_size),
-                    (x, y + grid_size)
-                ])
-                intersection = poly.intersection(grid_cell)
-                if not intersection.is_empty:
-                    # Ja šūna pārklājas ar poligonu, ģenerējam vienu nejaušu punktu šūnas pārklājumā
-                    if isinstance(intersection, (Polygon, MultiPolygon)):
-                        # Ja pārklājums ir poligons vai multipoligons, ģenerējam punktu
-                        minx_i, miny_i, maxx_i, maxy_i = intersection.bounds
-                        # Ja pārklājums ir MultiPolygon, izvēlamies vienu no tiem
-                        if isinstance(intersection, MultiPolygon):
-                            intersection = random.choice(list(intersection))
-                            minx_i, miny_i, maxx_i, maxy_i = intersection.bounds
-                        # Ģenerējam nejaušu punktu pārklājuma teritorijā
-                        while True:
-                            rand_x = random.uniform(minx_i, maxx_i)
-                            rand_y = random.uniform(miny_i, maxy_i)
-                            rand_point = Point(rand_x, rand_y)
-                            if intersection.contains(rand_point):
-                                points.append(rand_point)
-                                break
+        # Note: Adjust the number of points based on the area and min_distance
+        # Simple random sampling with rejection
+        attempts = 0
+        max_attempts = k * 100  # Prevent infinite loop
+        while attempts < max_attempts:
+            x = random.uniform(minx, maxx)
+            y = random.uniform(miny, maxy)
+            point = Point(x, y)
+            if not poly.contains(point):
+                attempts += 1
+                continue
+            too_close = False
+            for p in points:
+                if point.distance(p) < min_distance:
+                    too_close = True
+                    break
+            if not too_close:
+                points.append(point)
+            attempts += 1
+            # Optional: Break early if point density is high enough
+            if len(points) >= (poly.area / (math.pi * (min_distance / 2) ** 2)):
+                break
     return points
 
 def convert_gdf_to_csv(gdf):
@@ -91,7 +84,7 @@ st.set_page_config(page_title="SHP Poligona Vizualizācija ar Punktiem", layout=
 
 st.title("SHP Poligona Vizualizācija Kartē ar Punktiem")
 st.markdown("""
-Šī lietotne ļauj jums augšupielādēt SHP (Shapefile) ZIP arhīvu, vizualizēt poligonus interaktīvā kartē un ģenerēt nejaušus punktus poligona iekšpusē ar maksimālu attālumu starp tiem 5 metri.
+Šī lietotne ļauj jums augšupielādēt SHP (Shapefile) ZIP arhīvu, vizualizēt poligonus interaktīvā kartē un ģenerēt nejaušus punktus poligona iekšpusē ar minimālu attālumu starp tiem 5 metri.
 **Piezīme:** Augšupielādējiet ZIP failu, kas satur visus nepieciešamos Shapefile komponentus (.shp, .shx, .dbf utt.).
 """)
 
@@ -184,7 +177,7 @@ if uploaded_file is not None:
                     for idx, row in gdf_epsg3059.iterrows():
                         geometry = row['geometry']
                         if geometry.type == 'Polygon' or geometry.type == 'MultiPolygon':
-                            points = generate_random_points_grid_based(geometry, grid_size=5)
+                            points = generate_random_points_with_min_distance(geometry, min_distance=5)
                             all_points.extend(points)
 
                     if not all_points:
