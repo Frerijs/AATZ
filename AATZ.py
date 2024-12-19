@@ -91,7 +91,7 @@ st.set_page_config(page_title="SHP Poligona Vizualizācija ar Punktiem", layout=
 
 st.title("SHP Poligona Vizualizācija Kartē ar Punktiem")
 st.markdown("""
-Šī lietotne ļauj jums augšupielādēt SHP (Shapefile) ZIP arhīvu, vizualizēt poligonus interaktīvā kartē un ģenerēt nejaušus punktus poligona iekšpusē ar minimālu attālumu starp tiem 5 metri.
+Šī lietotne ļauj jums augšupielādēt SHP (Shapefile) ZIP arhīvu, vizualizēt poligonus interaktīvā kartē un ģenerēt nejaušus punktus poligona iekšpusē ar maksimālu attālumu starp tiem 5 metri.
 **Piezīme:** Augšupielādējiet ZIP failu, kas satur visus nepieciešamos Shapefile komponentus (.shp, .shx, .dbf utt.).
 """)
 
