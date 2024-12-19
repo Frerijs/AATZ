@@ -5,28 +5,59 @@ import tempfile
 import os
 import folium
 from streamlit_folium import st_folium
-from shapely.geometry import Point
+from shapely.geometry import Point, Polygon, MultiPolygon
 import numpy as np
 from folium.plugins import MarkerCluster
 import pandas as pd
 from io import BytesIO
+import random
+import math
 
-def generate_grid_points(polygon, spacing=5):
+def generate_random_points_with_min_distance(polygon, min_distance=5, k=30):
     """
-    Ģenerē punktus poligona iekšpusē ar noteiktu attālumu starp tiem.
+    Ģenerē nejaušus punktus poligona iekšpusē, nodrošinot, ka attālums starp jebkuriem diviem punktiem nepārsniedz min_distance.
 
     Args:
-        polygon (shapely.geometry.Polygon): Poligons, iekšā kurā ģenerēt punktus.
-        spacing (float): Attālums starp punktiem metriem.
+        polygon (shapely.geometry.Polygon or MultiPolygon): Poligons, iekšā kurā ģenerēt punktus.
+        min_distance (float): Minimālais attālums starp punktiem metriem.
+        k (int): Maksimālais mēģinājumu skaits, lai atrastu jaunu punktu.
 
     Returns:
         list of shapely.geometry.Point: Saraksts ar ģenerētajiem punktiem.
     """
-    minx, miny, maxx, maxy = polygon.bounds
-    x_coords = np.arange(minx, maxx, spacing)
-    y_coords = np.arange(miny, maxy, spacing)
-    grid_points = [Point(x, y) for x in x_coords for y in y_coords if polygon.contains(Point(x, y))]
-    return grid_points
+    points = []
+    if isinstance(polygon, Polygon):
+        polygons = [polygon]
+    elif isinstance(polygon, MultiPolygon):
+        polygons = list(polygon)
+    else:
+        return points
+
+    for poly in polygons:
+        minx, miny, maxx, maxy = poly.bounds
+        # Note: Adjust the number of points based on the area and min_distance
+        # Simple random sampling with rejection
+        attempts = 0
+        max_attempts = k * 100  # Prevent infinite loop
+        while attempts < max_attempts:
+            x = random.uniform(minx, maxx)
+            y = random.uniform(miny, maxy)
+            point = Point(x, y)
+            if not poly.contains(point):
+                attempts += 1
+                continue
+            too_close = False
+            for p in points:
+                if point.distance(p) < min_distance:
+                    too_close = True
+                    break
+            if not too_close:
+                points.append(point)
+            attempts += 1
+            # Optional: Break early if point density is high enough
+            if len(points) >= (poly.area / (math.pi * (min_distance / 2) ** 2)):
+                break
+    return points
 
 def convert_gdf_to_csv(gdf):
     """
@@ -53,7 +84,7 @@ st.set_page_config(page_title="SHP Poligona Vizualizācija ar Punktiem", layout=
 
 st.title("SHP Poligona Vizualizācija Kartē ar Punktiem")
 st.markdown("""
-Šī lietotne ļauj jums augšupielādēt SHP (Shapefile) ZIP arhīvu, vizualizēt poligonus interaktīvā kartē un ģenerēt punktus poligona iekšpusē ar maksimālu attālumu starp tiem 5 metri.
+Šī lietotne ļauj jums augšupielādēt SHP (Shapefile) ZIP arhīvu, vizualizēt poligonus interaktīvā kartē un ģenerēt nejaušus punktus poligona iekšpusē ar minimālu attālumu starp tiem 5 metri.
 **Piezīme:** Augšupielādējiet ZIP failu, kas satur visus nepieciešamos Shapefile komponentus (.shp, .shx, .dbf utt.).
 """)
 
@@ -145,13 +176,9 @@ if uploaded_file is not None:
                     all_points = []
                     for idx, row in gdf_epsg3059.iterrows():
                         geometry = row['geometry']
-                        if geometry.type == 'Polygon':
-                            points = generate_grid_points(geometry, spacing=5)
+                        if geometry.type == 'Polygon' or geometry.type == 'MultiPolygon':
+                            points = generate_random_points_with_min_distance(geometry, min_distance=5)
                             all_points.extend(points)
-                        elif geometry.type == 'MultiPolygon':
-                            for poly in geometry:
-                                points = generate_grid_points(poly, spacing=5)
-                                all_points.extend(points)
 
                     if not all_points:
                         st.warning("Neizdevās ģenerēt punktus no SHP faila.")
