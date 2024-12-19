@@ -8,6 +8,8 @@ from streamlit_folium import st_folium
 from shapely.geometry import Point
 import numpy as np
 from folium.plugins import MarkerCluster
+import pandas as pd
+from io import BytesIO
 
 def generate_grid_points(polygon, spacing=5):
     """
@@ -26,10 +28,30 @@ def generate_grid_points(polygon, spacing=5):
     grid_points = [Point(x, y) for x in x_coords for y in y_coords if polygon.contains(Point(x, y))]
     return grid_points
 
+def convert_gdf_to_csv(gdf):
+    """
+    Konvertē GeoDataFrame uz CSV formātu ar x, y, z koordinātēm.
+
+    Args:
+        gdf (geopandas.GeoDataFrame): GeoDataFrame ar punktiem.
+
+    Returns:
+        BytesIO: CSV datu plūsma.
+    """
+    # Izveidojam DataFrame ar x, y koordinātēm
+    df = pd.DataFrame({
+        'x': gdf.geometry.x,
+        'y': gdf.geometry.y,
+        'z': 0  # Pievienojam z koordinātu (piemēram, 0)
+    })
+    csv_buffer = BytesIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_buffer.seek(0)
+    return csv_buffer
+
 st.set_page_config(page_title="SHP Poligona Vizualizācija ar Punktiem", layout="wide")
 
 st.title("SHP Poligona Vizualizācija Kartē ar Punktiem")
-
 st.markdown("""
 Šī lietotne ļauj jums augšupielādēt SHP (Shapefile) ZIP arhīvu, vizualizēt poligonus interaktīvā kartē un ģenerēt punktus poligona iekšpusē ar maksimālu attālumu starp tiem 5 metri.
 **Piezīme:** Augšupielādējiet ZIP failu, kas satur visus nepieciešamos Shapefile komponentus (.shp, .shx, .dbf utt.).
@@ -178,7 +200,18 @@ if uploaded_file is not None:
 
                         folium.LayerControl().add_to(m)
 
+                        # Pievienojam karti Streamlit interfeisam
                         st_folium(m, width=700, height=500)
+
+                        # Pievienojam lejupielādes pogu
+                        st.subheader("Lejupielādēt ģenerētos punktus")
+                        csv_buffer = convert_gdf_to_csv(points_gdf)
+                        st.download_button(
+                            label="Lejupielādēt Punktus kā CSV",
+                            data=csv_buffer,
+                            file_name="punkti.csv",
+                            mime="text/csv"
+                        )
 
             except Exception as e:
                 st.error(f"Kļūda lasot SHP failu: {e}")
