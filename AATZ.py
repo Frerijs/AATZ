@@ -7,6 +7,7 @@ import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point
 import numpy as np
+from folium.plugins import MarkerCluster
 
 def generate_grid_points(polygon, spacing=5):
     """
@@ -43,7 +44,7 @@ if uploaded_file is not None:
         zip_path = os.path.join(tmpdirname, "uploaded_shp.zip")
         with open(zip_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
-        
+
         st.success("ZIP arhīvs veiksmīgi augšupielādēts un saglabāts.")
 
         # Izvelkam ZIP saturu
@@ -54,10 +55,10 @@ if uploaded_file is not None:
         except zipfile.BadZipFile:
             st.error("Nederīgs ZIP arhīvs. Lūdzu, pārliecinieties, ka augšupielādējat derīgu ZIP failu.")
             st.stop()
-        
+
         # Meklējam .shp failu pagaidu direktorijā
         shp_files = [file for file in os.listdir(tmpdirname) if file.endswith(".shp")]
-        
+
         if not shp_files:
             st.error("ZIP arhīvā nav atrasts .shp fails. Lūdzu, pārbaudiet arhīvu un mēģiniet vēlreiz.")
             st.stop()
@@ -66,10 +67,10 @@ if uploaded_file is not None:
                 shp_file = st.selectbox("Izvēlieties SHP failu:", shp_files)
             else:
                 shp_file = shp_files[0]
-            
+
             shp_path = os.path.join(tmpdirname, shp_file)
             st.write(f"Atrodamais SHP fails: {shp_path}")
-            
+
             # Pārbaudām, vai visi nepieciešamie faili eksistē
             required_extensions = ['.shp', '.shx', '.dbf']
             missing_files = []
@@ -82,23 +83,23 @@ if uploaded_file is not None:
                 st.stop()
             else:
                 st.success("Visi nepieciešamie faili ir atrasti.")
-            
+
             try:
                 # Nolasīt shapefile ar geopandas
                 gdf = gpd.read_file(shp_path)
                 st.write("GeoDataFrame satur:")
                 st.write(gdf.head())
-                
+
                 if gdf.empty:
                     st.warning("Shapefile nav saturis datus.")
                 else:
                     # Pārbaudām oriģinālo CRS
                     st.write(f"Oriģinālā CRS: {gdf.crs}")
-                    
+
                     # Pārbaudām, vai CRS ir EPSG:3059
                     if gdf.crs.to_string() != "EPSG:3059":
                         st.warning(f"Koordinātu sistēma nav EPSG:3059. Jūsu koordinātu sistēma ir {gdf.crs}.")
-                    
+
                     # Pārliecināties, ka koordinātu sistēma tiek pareizi pārveidota uz WGS84 (EPSG:4326)
                     try:
                         gdf = gdf.to_crs(epsg=4326)
@@ -107,18 +108,18 @@ if uploaded_file is not None:
                     except Exception as e:
                         st.error(f"Kļūda pārveidojot CRS: {e}")
                         st.stop()
-                    
+
                     # Pārbaudām, vai ģeometrija ir pareiza
                     if gdf.geometry.is_empty.all():
                         st.error("Visas ģeometrijas ir tukšas. Lūdzu, pārbaudiet SHP failu.")
                         st.stop()
-                    
+
                     # Ģenerējam punktus poligona iekšpusē
                     st.subheader("Ģenerētie punkti poligona iekšpusē")
-                    
+
                     # Pārvēršam atpakaļ uz EPSG:3059, lai ģenerētu punktus precīzi metriskajā sistēmā
                     gdf_epsg3059 = gdf.to_crs(epsg=3059)
-                    
+
                     all_points = []
                     for idx, row in gdf_epsg3059.iterrows():
                         geometry = row['geometry']
@@ -129,24 +130,26 @@ if uploaded_file is not None:
                             for poly in geometry:
                                 points = generate_grid_points(poly, spacing=5)
                                 all_points.extend(points)
-                    
+
                     if not all_points:
                         st.warning("Neizdevās ģenerēt punktus no SHP faila.")
                     else:
                         # Izveidojam GeoDataFrame ar punktiem
                         points_gdf = gpd.GeoDataFrame(geometry=all_points, crs="EPSG:3059")
-                        
+
                         # Pārvēršam punktus uz EPSG:4326
                         points_gdf = points_gdf.to_crs(epsg=4326)
-                        
+
                         st.write(f"Ģenerēto punktu skaits: {len(points_gdf)}")
                         st.write(points_gdf.head())
-                        
+
                         # Izveidojiet Folium karti
-                        # Izmantojam vidējo poligona centru kā kartes centru
-                        centroid = gdf.geometry.centroid.unary_union
-                        m = folium.Map(location=[centroid.y, centroid.x], zoom_start=14)
-                        
+                        # Izmantojam poligona kopējo robežu, lai noteiktu kartes centru
+                        minx, miny, maxx, maxy = gdf.total_bounds
+                        center_x = (minx + maxx) / 2
+                        center_y = (miny + maxy) / 2
+                        m = folium.Map(location=[center_y, center_x], zoom_start=14)
+
                         # Pievienojam poligonu
                         folium.GeoJson(
                             gdf,
@@ -158,29 +161,24 @@ if uploaded_file is not None:
                                 'fillOpacity': 0.5,
                             }
                         ).add_to(m)
-                        
-                        # Pievienojam punktus
-                        folium.GeoJson(
-                            points_gdf,
-                            name="Punkti",
-                            marker=folium.CircleMarker(
+
+                        # Pievienojam punktus ar MarkerCluster
+                        marker_cluster = MarkerCluster(name="Punkti").add_to(m)
+
+                        for _, point in points_gdf.iterrows():
+                            folium.CircleMarker(
+                                location=[point.geometry.y, point.geometry.x],
                                 radius=2,
                                 color='red',
                                 fill=True,
-                                fill_color='red'
-                            ),
-                            style_function=lambda feature: {
-                                'radius': 2,
-                                'color': 'red',
-                                'fillColor': 'red',
-                                'fillOpacity': 0.7,
-                                'weight': 1,
-                            }
-                        ).add_to(m)
-                        
+                                fill_color='red',
+                                fill_opacity=0.7,
+                                weight=1
+                            ).add_to(marker_cluster)
+
                         folium.LayerControl().add_to(m)
-                        
+
                         st_folium(m, width=700, height=500)
-                        
+
             except Exception as e:
                 st.error(f"Kļūda lasot SHP failu: {e}")
