@@ -124,15 +124,15 @@ if uploaded_file is not None:
 
                     # Pārliecināties, ka koordinātu sistēma tiek pareizi pārveidota uz WGS84 (EPSG:4326)
                     try:
-                        gdf = gdf.to_crs(epsg=4326)
+                        gdf_wgs84 = gdf.to_crs(epsg=4326)
                         st.success("Koordinātu sistēma pārveidota uz WGS84 (EPSG:4326).")
-                        st.write(f"Jaunā CRS: {gdf.crs}")
+                        st.write(f"Jaunā CRS: {gdf_wgs84.crs}")
                     except Exception as e:
                         st.error(f"Kļūda pārveidojot CRS: {e}")
                         st.stop()
 
                     # Pārbaudām, vai ģeometrija ir pareiza
-                    if gdf.geometry.is_empty.all():
+                    if gdf_wgs84.geometry.is_empty.all():
                         st.error("Visas ģeometrijas ir tukšas. Lūdzu, pārbaudiet SHP failu.")
                         st.stop()
 
@@ -156,25 +156,25 @@ if uploaded_file is not None:
                     if not all_points:
                         st.warning("Neizdevās ģenerēt punktus no SHP faila.")
                     else:
-                        # Izveidojam GeoDataFrame ar punktiem
-                        points_gdf = gpd.GeoDataFrame(geometry=all_points, crs="EPSG:3059")
+                        # Izveidojam GeoDataFrame ar punktiem EPSG:3059
+                        points_gdf_3059 = gpd.GeoDataFrame(geometry=all_points, crs="EPSG:3059")
 
                         # Pārvēršam punktus uz EPSG:4326
-                        points_gdf = points_gdf.to_crs(epsg=4326)
+                        points_gdf_4326 = points_gdf_3059.to_crs(epsg=4326)
 
-                        st.write(f"Ģenerēto punktu skaits: {len(points_gdf)}")
-                        st.write(points_gdf.head())
+                        st.write(f"Ģenerēto punktu skaits: {len(points_gdf_3059)}")
+                        st.write(points_gdf_3059.head())
 
                         # Izveidojiet Folium karti
                         # Izmantojam poligona kopējo robežu, lai noteiktu kartes centru
-                        minx, miny, maxx, maxy = gdf.total_bounds
+                        minx, miny, maxx, maxy = gdf_wgs84.total_bounds
                         center_x = (minx + maxx) / 2
                         center_y = (miny + maxy) / 2
                         m = folium.Map(location=[center_y, center_x], zoom_start=14)
 
                         # Pievienojam poligonu
                         folium.GeoJson(
-                            gdf,
+                            gdf_wgs84,
                             name="Poligoni",
                             style_function=lambda feature: {
                                 'fillColor': '#007BFF',
@@ -187,7 +187,7 @@ if uploaded_file is not None:
                         # Pievienojam punktus ar MarkerCluster
                         marker_cluster = MarkerCluster(name="Punkti").add_to(m)
 
-                        for _, point in points_gdf.iterrows():
+                        for _, point in points_gdf_4326.iterrows():
                             folium.CircleMarker(
                                 location=[point.geometry.y, point.geometry.x],
                                 radius=2,
@@ -205,7 +205,7 @@ if uploaded_file is not None:
 
                         # Pievienojam lejupielādes pogu
                         st.subheader("Lejupielādēt ģenerētos punktus")
-                        csv_buffer = convert_gdf_to_csv(points_gdf)
+                        csv_buffer = convert_gdf_to_csv(points_gdf_3059)
                         st.download_button(
                             label="Lejupielādēt Punktus kā CSV",
                             data=csv_buffer,
