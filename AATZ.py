@@ -1,18 +1,36 @@
 import streamlit as st
 import geopandas as gpd
-import pydeck as pdk
 import zipfile
 import tempfile
 import os
 import folium
 from streamlit_folium import st_folium
+from shapely.geometry import Point
+import numpy as np
 
-st.set_page_config(page_title="SHP Poligona Vizualizācija", layout="wide")
+def generate_grid_points(polygon, spacing=5):
+    """
+    Ģenerē punktus poligona iekšpusē ar noteiktu attālumu starp tiem.
 
-st.title("SHP Poligona Vizualizācija Kartē")
+    Args:
+        polygon (shapely.geometry.Polygon): Poligons, iekšā kurā ģenerēt punktus.
+        spacing (float): Attālums starp punktiem metriem.
+
+    Returns:
+        list of shapely.geometry.Point: Saraksts ar ģenerētajiem punktiem.
+    """
+    minx, miny, maxx, maxy = polygon.bounds
+    x_coords = np.arange(minx, maxx, spacing)
+    y_coords = np.arange(miny, maxy, spacing)
+    grid_points = [Point(x, y) for x in x_coords for y in y_coords if polygon.contains(Point(x, y))]
+    return grid_points
+
+st.set_page_config(page_title="SHP Poligona Vizualizācija ar Punktiem", layout="wide")
+
+st.title("SHP Poligona Vizualizācija Kartē ar Punktiem")
 
 st.markdown("""
-Šī lietotne ļauj jums augšupielādēt SHP (Shapefile) ZIP arhīvu un vizualizēt poligonus interaktīvā kartē.
+Šī lietotne ļauj jums augšupielādēt SHP (Shapefile) ZIP arhīvu, vizualizēt poligonus interaktīvā kartē un ģenerēt punktus poligona iekšpusē ar maksimālu attālumu starp tiem 5 metri.
 **Piezīme:** Augšupielādējiet ZIP failu, kas satur visus nepieciešamos Shapefile komponentus (.shp, .shx, .dbf utt.).
 """)
 
@@ -95,27 +113,74 @@ if uploaded_file is not None:
                         st.error("Visas ģeometrijas ir tukšas. Lūdzu, pārbaudiet SHP failu.")
                         st.stop()
                     
-                    # Izvilkt centroidu, lai noteiktu sākuma skatījumu
-                    centroid = gdf.geometry.centroid.iloc[0]
-                    st.write(f"Poligona centroids: ({centroid.x}, {centroid.y})")
+                    # Ģenerējam punktus poligona iekšpusē
+                    st.subheader("Ģenerētie punkti poligona iekšpusē")
                     
-                    # Izveidojiet Folium karti
-                    m = folium.Map(location=[centroid.y, centroid.x], zoom_start=10)
+                    # Pārvēršam atpakaļ uz EPSG:3059, lai ģenerētu punktus precīzi metriskajā sistēmā
+                    gdf_epsg3059 = gdf.to_crs(epsg=3059)
                     
-                    folium.GeoJson(
-                        gdf,
-                        name="Poligoni",
-                        style_function=lambda feature: {
-                            'fillColor': '#007BFF',
-                            'color': 'black',
-                            'weight': 2,
-                            'fillOpacity': 0.5,
-                        }
-                    ).add_to(m)
+                    all_points = []
+                    for idx, row in gdf_epsg3059.iterrows():
+                        geometry = row['geometry']
+                        if geometry.type == 'Polygon':
+                            points = generate_grid_points(geometry, spacing=5)
+                            all_points.extend(points)
+                        elif geometry.type == 'MultiPolygon':
+                            for poly in geometry:
+                                points = generate_grid_points(poly, spacing=5)
+                                all_points.extend(points)
                     
-                    folium.LayerControl().add_to(m)
-                    
-                    st_folium(m, width=700, height=500)
-                    
+                    if not all_points:
+                        st.warning("Neizdevās ģenerēt punktus no SHP faila.")
+                    else:
+                        # Izveidojam GeoDataFrame ar punktiem
+                        points_gdf = gpd.GeoDataFrame(geometry=all_points, crs="EPSG:3059")
+                        
+                        # Pārvēršam punktus uz EPSG:4326
+                        points_gdf = points_gdf.to_crs(epsg=4326)
+                        
+                        st.write(f"Ģenerēto punktu skaits: {len(points_gdf)}")
+                        st.write(points_gdf.head())
+                        
+                        # Izveidojiet Folium karti
+                        # Izmantojam vidējo poligona centru kā kartes centru
+                        centroid = gdf.geometry.centroid.unary_union
+                        m = folium.Map(location=[centroid.y, centroid.x], zoom_start=14)
+                        
+                        # Pievienojam poligonu
+                        folium.GeoJson(
+                            gdf,
+                            name="Poligoni",
+                            style_function=lambda feature: {
+                                'fillColor': '#007BFF',
+                                'color': 'black',
+                                'weight': 2,
+                                'fillOpacity': 0.5,
+                            }
+                        ).add_to(m)
+                        
+                        # Pievienojam punktus
+                        folium.GeoJson(
+                            points_gdf,
+                            name="Punkti",
+                            marker=folium.CircleMarker(
+                                radius=2,
+                                color='red',
+                                fill=True,
+                                fill_color='red'
+                            ),
+                            style_function=lambda feature: {
+                                'radius': 2,
+                                'color': 'red',
+                                'fillColor': 'red',
+                                'fillOpacity': 0.7,
+                                'weight': 1,
+                            }
+                        ).add_to(m)
+                        
+                        folium.LayerControl().add_to(m)
+                        
+                        st_folium(m, width=700, height=500)
+                        
             except Exception as e:
                 st.error(f"Kļūda lasot SHP failu: {e}")
