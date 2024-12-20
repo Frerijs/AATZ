@@ -98,7 +98,7 @@ def login():
             st.error("Nepareizs lietotājvārds vai parole.")
             
 def show_login():
-    st.title("Ciparu pārvēršana vārdos")
+    st.title("LAS Punktu Filtrēšanas Aplikācija")
     with st.form(key='login_form'):
         username = st.text_input("Lietotājvārds", key='username')
         password = st.text_input("Parole", type="password", key='password')
