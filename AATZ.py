@@ -28,16 +28,13 @@ APP_VERSION = "1.0"
 APP_TYPE = "web"
 
 def authenticate(username, password):
-    """
-    Autentificē lietotāju, nosūtot pieprasījumu uz Supabase.
-    """
     try:
         headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
             "Content-Type": "application/json",
         }
-        url = f"{SUPABASE_URL}/rest/v1/users"
+        url = f"{supabase_url}/rest/v1/users"
         params = {
             "select": "*",
             "username": f"eq.{username}",
@@ -58,9 +55,6 @@ def authenticate(username, password):
         return False
 
 def log_user_login(username):
-    """
-    Ieraksta lietotāja pieteikšanos Supabase datubāzē.
-    """
     try:
         # Iegūstiet aktuālo laiku Latvijas laika zonā
         riga_tz = ZoneInfo('Europe/Riga')
@@ -76,11 +70,11 @@ def log_user_login(username):
         }
 
         headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
             "Content-Type": "application/json"
         }
-        url = f"{SUPABASE_URL}/rest/v1/user_data"
+        url = f"{supabase_url}/rest/v1/user_data"
 
         response = requests.post(url, json=data, headers=headers)
 
@@ -90,9 +84,6 @@ def log_user_login(username):
         st.error(f"Kļūda: {str(e)}")
 
 def login():
-    """
-    Apstrādā lietotāja login pieprasījumu.
-    """
     username = st.session_state.get('username', '').strip()
     password = st.session_state.get('password', '').strip()
     if not username or not password:
@@ -101,17 +92,13 @@ def login():
         if authenticate(username, password):
             st.session_state.logged_in = True
             st.session_state.username_logged = username
+            # Noņemta rindiņa "Veiksmīgi pieteicies!"
             log_user_login(username)
-            st.success("Veiksmīgi pieteicies!")
         else:
             st.error("Nepareizs lietotājvārds vai parole.")
-
+            
 def show_login():
-    """
-    Parāda login formu lietotājam.
-    """
-    st.title("LAS Punktu Filtrēšanas Aplikācija")
-    st.subheader("Pieteikties")
+    st.title("Ciparu pārvēršana vārdos")
     with st.form(key='login_form'):
         username = st.text_input("Lietotājvārds", key='username')
         password = st.text_input("Parole", type="password", key='password')
