@@ -1,244 +1,205 @@
-import streamlit as st
 import geopandas as gpd
-import zipfile
-import tempfile
+from shapely.geometry import Point
 import os
-import folium
-from streamlit_folium import st_folium
-from shapely.geometry import Point, Polygon, MultiPolygon
-import numpy as np
-from folium.plugins import MarkerCluster
 import pandas as pd
-from io import BytesIO
-import random
 import math
+import warnings
+from tqdm import tqdm
+import laspy
+import numpy as np
+from scipy.spatial import cKDTree
+import streamlit as st
+import zipfile
+import io
 
-def generate_random_points_with_min_distance(polygon, min_distance=5, k=30):
+# Ignorē Shapely runtime brīdinājumus, lai netraucētu skripta darbību
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+def load_polygons(shapefile_bytes, target_crs='EPSG:3059'):
     """
-    Ģenerē nejaušus punktus poligona iekšpusē, nodrošinot, ka attālums starp jebkuriem diviem punktiem nepārsniedz min_distance.
-
-    Args:
-        polygon (shapely.geometry.Polygon or MultiPolygon): Poligons, iekšā kurā ģenerēt punktus.
-        min_distance (float): Minimālais attālums starp punktiem metriem.
-        k (int): Maksimālais mēģinājumu skaits, lai atrastu jaunu punktu.
-
-    Returns:
-        list of shapely.geometry.Point: Saraksts ar ģenerētajiem punktiem.
+    Ielādē shapefile no bytes, validē poligonus un pārprojekcē uz mērķa CRS.
     """
-    points = []
-    if isinstance(polygon, Polygon):
-        polygons = [polygon]
-    elif isinstance(polygon, MultiPolygon):
-        polygons = list(polygon)
+    # Sagatavot shapefile no zip
+    with zipfile.ZipFile(shapefile_bytes) as z:
+        z.extractall("temp_shapefile")
+    shapefile_path = [os.path.join("temp_shapefile", f) for f in os.listdir("temp_shapefile") if f.endswith('.shp')][0]
+    
+    print(f"Ielādē shapefile no: {shapefile_path}")
+    gdf = gpd.read_file(shapefile_path)
+    # Validē un izlabo poligonus, ja nepieciešams
+    gdf['geometry'] = gdf['geometry'].apply(lambda geom: geom.buffer(0) if not geom.is_valid else geom)
+    # Pārprojekcē uz mērķa CRS, lai nodrošinātu metriskas vienības
+    gdf = gdf.to_crs(target_crs)
+    print(f"Poligoni pārprojekcēti uz CRS: {target_crs}")
+    return gdf
+
+def load_lidar(las_file, target_crs='EPSG:3059'):
+    """
+    Ielādē Lidar datus no LAS faila, pārprojekcē uz mērķa CRS un atgriež kā GeoDataFrame.
+    """
+    st.write("Ielādē LAS datus...")
+    las = laspy.read(las_file)
+    points = np.vstack((las.x, las.y, las.z)).transpose()
+    # Izveido GeoDataFrame ar LAS punktiem
+    lidar_gdf = gpd.GeoDataFrame(
+        {'x': points[:,0], 'y': points[:,1], 'z': points[:,2]},
+        geometry=[Point(x, y) for x, y, z in points],
+        crs='EPSG:3059'  # Pieņemot, ka LAS dati ir EPSG:3059
+    )
+    # Pārprojekcē, ja nepieciešams
+    if lidar_gdf.crs != target_crs:
+        st.write(f"Pārprojekcē LAS datus no {lidar_gdf.crs} uz {target_crs}...")
+        lidar_gdf = lidar_gdf.to_crs(target_crs)
     else:
-        return points
+        st.write("LAS dati jau ir norādītajā CRS.")
+    return lidar_gdf
 
-    for poly in polygons:
-        minx, miny, maxx, maxy = poly.bounds
-        # Note: Adjust the number of points based on the area and min_distance
-        # Simple random sampling with rejection
-        attempts = 0
-        max_attempts = k * 100  # Prevent infinite loop
-        while attempts < max_attempts:
-            x = random.uniform(minx, maxx)
-            y = random.uniform(miny, maxy)
-            point = Point(x, y)
-            if not poly.contains(point):
-                attempts += 1
-                continue
-            too_close = False
-            for p in points:
-                if point.distance(p) < min_distance:
-                    too_close = True
-                    break
-            if not too_close:
-                points.append(point)
-            attempts += 1
-            # Optional: Break early if point density is high enough
-            if len(points) >= (poly.area / (math.pi * (min_distance / 2) ** 2)):
-                break
-    return points
-
-def convert_gdf_to_csv(gdf):
+def filter_points_within_polygons(lidar_gdf, polygons_gdf):
     """
-    Konvertē GeoDataFrame uz CSV formātu ar x, y, z koordinātēm.
-
-    Args:
-        gdf (geopandas.GeoDataFrame): GeoDataFrame ar punktiem.
-
-    Returns:
-        BytesIO: CSV datu plūsma.
+    Atlasīt tikai tos LAS punktus, kas atrodas poligonos.
     """
-    # Izveidojam DataFrame ar x, y koordinātēm
-    df = pd.DataFrame({
-        'x': gdf.geometry.x,
-        'y': gdf.geometry.y,
-        'z': 0  # Pievienojam z koordinātu (piemēram, 0)
-    })
-    csv_buffer = BytesIO()
-    df.to_csv(csv_buffer, index=False)
-    csv_buffer.seek(0)
-    return csv_buffer
+    st.write("Atlasīt punktus, kas atrodas poligonos...")
+    # Izmanto spatial join, lai atlasītu punktus, kas atrodas poligonos
+    points_within = gpd.sjoin(lidar_gdf, polygons_gdf, how='inner', predicate='within')
+    # Izņem neatbilstošos atribūtus, kas iegūti no spatial join
+    points_within = points_within.drop(columns=['index_right'])
+    st.write(f"Atlasīti {len(points_within)} punkti, kas atrodas poligonos.")
+    return points_within
 
-st.set_page_config(page_title="SHP Poligona Vizualizācija ar Punktiem", layout="wide")
+def compute_nearest_distances(points_coords):
+    """
+    Izmanto KD-tree, lai aprēķinātu tuvāko punktu attālumu katram punktam.
+    """
+    tree = cKDTree(points_coords)
+    distances, indices = tree.query(points_coords, k=2)  # k=2, lai izslēgtu sevi
+    nearest_distances = distances[:, 1]  # Otrā vērtība ir tuvākais neighbors attālums
+    return nearest_distances
 
-st.title("SHP Poligona Vizualizācija Kartē ar Punktiem")
-st.markdown("""
-Šī lietotne ļauj jums augšupielādēt SHP (Shapefile) ZIP arhīvu, vizualizēt poligonus interaktīvā kartē un ģenerēt nejaušus punktus poligona iekšpusē ar minimālu attālumu starp tiem 5 metri.
-**Piezīme:** Augšupielādējiet ZIP failu, kas satur visus nepieciešamos Shapefile komponentus (.shp, .shx, .dbf utt.).
-""")
+def select_points_with_constraints(points_gdf, min_distance=2, max_distance=7):
+    """
+    Atlasīt punktus, nodrošinot, ka:
+    - Nav divu punktu, kuru attālums ir mazāks par min_distance.
+    - Katram punktam ir vismaz viens cits punkts, kura attālums ir ne lielāks par max_distance.
+    """
+    st.write("Atlasīt punktus ar attāluma ierobežojumiem...")
+    # Izvilkt koordinātes
+    coords = np.array([(point.x, point.y) for point in points_gdf.geometry])
+    num_points = coords.shape[0]
+    tree = cKDTree(coords)
+    
+    # Shuffle point order
+    indices = np.random.permutation(num_points)
+    
+    selected_indices = []
+    selected_mask = np.zeros(num_points, dtype=bool)
+    covered_mask = np.zeros(num_points, dtype=bool)
+    
+    st.write("Izvēlas punktus, saglabājot minimālo attālumu...")
+    for idx in tqdm(indices, desc="Min distance selection"):
+        if not covered_mask[idx]:
+            # Atlasīt šo punktu
+            selected_indices.append(idx)
+            selected_mask[idx] = True
+            # Atzīmēt visus punktus, kas ir mazāk par min_distance, kā segtus (nav izvēlēti)
+            neighbors_min = tree.query_ball_point(coords[idx], r=min_distance)
+            covered_mask[neighbors_min] = True
+    
+    # Tagad pārbaudīt katram atlasītajam punktam, vai tam ir vismaz viens cits punkts ar attālumu <= max_distance
+    st.write("Pārbauda katru atlasīto punktu, vai tam ir vismaz viens cits punkts ar attālumu <= max_distance...")
+    valid_selected = []
+    selected_coords = coords[selected_indices]
+    selected_tree = cKDTree(selected_coords)
+    
+    for i, coord in enumerate(tqdm(selected_coords, desc="Verifying max distance")):
+        neighbors = selected_tree.query_ball_point(coord, r=max_distance)
+        if len(neighbors) >1:  # ir vismaz viens cits punkts
+            valid_selected.append(selected_indices[i])
+    
+    # Izveido filtrēto GeoDataFrame
+    filtered_gdf = points_gdf.iloc[valid_selected].copy()
+    st.write(f"Atlasīti {len(filtered_gdf)} punkti, kas atbilst attāluma kritērijiem.")
+    
+    return filtered_gdf
 
-uploaded_file = st.file_uploader("Augšupielādējiet SHP ZIP arhīvu", type=["zip"])
+def create_zip_from_gdf(gdf, filename='filtered_lidar_points'):
+    """
+    Izveido zip arhīvu no GeoDataFrame shapefile failiem.
+    """
+    # Saglabā shapefile uz disku
+    shapefile_dir = f"temp_shapefile_{filename}"
+    os.makedirs(shapefile_dir, exist_ok=True)
+    shapefile_path = os.path.join(shapefile_dir, f"{filename}.shp")
+    gdf.to_file(shapefile_path, driver='ESRI Shapefile')
+    
+    # Izveido zip arhīvu
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(shapefile_dir):
+            for file in files:
+                zf.write(os.path.join(root, file), arcname=file)
+    zip_buffer.seek(0)
+    
+    # Tīra temporāros failus
+    for file in os.listdir(shapefile_dir):
+        os.remove(os.path.join(shapefile_dir, file))
+    os.rmdir(shapefile_dir)
+    
+    return zip_buffer
 
-if uploaded_file is not None:
-    with tempfile.TemporaryDirectory() as tmpdirname:
-        st.write(f"Pagaidu direktorija: {tmpdirname}")
-        # Saglabājam augšupielādēto ZIP failu pagaidu direktorijā
-        zip_path = os.path.join(tmpdirname, "uploaded_shp.zip")
-        with open(zip_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-
-        st.success("ZIP arhīvs veiksmīgi augšupielādēts un saglabāts.")
-
-        # Izvelkam ZIP saturu
-        try:
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(tmpdirname)
-            st.success("ZIP arhīvs veiksmīgi izvilkts.")
-        except zipfile.BadZipFile:
-            st.error("Nederīgs ZIP arhīvs. Lūdzu, pārliecinieties, ka augšupielādējat derīgu ZIP failu.")
-            st.stop()
-
-        # Meklējam .shp failu pagaidu direktorijā
-        shp_files = [file for file in os.listdir(tmpdirname) if file.endswith(".shp")]
-
-        if not shp_files:
-            st.error("ZIP arhīvā nav atrasts .shp fails. Lūdzu, pārbaudiet arhīvu un mēģiniet vēlreiz.")
-            st.stop()
+def main():
+    st.title("LAS Punktu Filtrēšanas Aplikācija")
+    st.write("Atlasiet LAS un poligonu shapefile failus, un norādiet attāluma ierobežojumus punktu filtrēšanai.")
+    
+    # Shapefile Augšupielāde
+    st.header("1. Augšupielādēt Poligonu Shapefile")
+    shapefile = st.file_uploader("Izvēlieties shapefile (ZIP formātā)", type=["zip"])
+    
+    # LAS Faila Augšupielāde
+    st.header("2. Augšupielādēt LAS Failu")
+    las_file = st.file_uploader("Izvēlieties LAS failu", type=["las", "laz"])
+    
+    if shapefile and las_file:
+        # Iegūst lietotāja ievadi par attāluma ierobežojumiem
+        st.header("3. Norādīt Attāluma Ierobežojumus")
+        min_distance = st.number_input("Minimālais attālums starp punktiem (metri):", min_value=0.1, value=2.0, step=0.1)
+        max_distance = st.number_input("Maksimālais attālums starp punktiem (metri):", min_value=0.1, value=7.0, step=0.1)
+        
+        if min_distance > max_distance:
+            st.error("Minimālais attālums nevar būt lielāks par maksimālo attālumu.")
         else:
-            if len(shp_files) > 1:
-                shp_file = st.selectbox("Izvēlieties SHP failu:", shp_files)
-            else:
-                shp_file = shp_files[0]
-
-            shp_path = os.path.join(tmpdirname, shp_file)
-            st.write(f"Atrodamais SHP fails: {shp_path}")
-
-            # Pārbaudām, vai visi nepieciešamie faili eksistē
-            required_extensions = ['.shp', '.shx', '.dbf']
-            missing_files = []
-            for ext in required_extensions:
-                file = os.path.splitext(shp_file)[0] + ext
-                if not os.path.exists(os.path.join(tmpdirname, file)):
-                    missing_files.append(file)
-            if missing_files:
-                st.error(f"Trūkst nepieciešamie faili: {', '.join(missing_files)}. Lūdzu, pārbaudiet ZIP arhīvu.")
-                st.stop()
-            else:
-                st.success("Visi nepieciešamie faili ir atrasti.")
-
-            try:
-                # Nolasīt shapefile ar geopandas
-                gdf = gpd.read_file(shp_path)
-                st.write("GeoDataFrame satur:")
-                st.write(gdf.head())
-
-                if gdf.empty:
-                    st.warning("Shapefile nav saturis datus.")
-                else:
-                    # Pārbaudām oriģinālo CRS
-                    st.write(f"Oriģinālā CRS: {gdf.crs}")
-
-                    # Pārbaudām, vai CRS ir EPSG:3059
-                    if gdf.crs.to_string() != "EPSG:3059":
-                        st.warning(f"Koordinātu sistēma nav EPSG:3059. Jūsu koordinātu sistēma ir {gdf.crs}.")
-
-                    # Pārliecināties, ka koordinātu sistēma tiek pareizi pārveidota uz WGS84 (EPSG:4326)
+            # Apstrādes Poga
+            if st.button("Sākt Punktu Filtrēšanu"):
+                with st.spinner("Apstrādā datus..."):
                     try:
-                        gdf_wgs84 = gdf.to_crs(epsg=4326)
-                        st.success("Koordinātu sistēma pārveidota uz WGS84 (EPSG:4326).")
-                        st.write(f"Jaunā CRS: {gdf_wgs84.crs}")
+                        # Ielādē poligonus
+                        polygons_gdf = load_polygons(shapefile)
+                        
+                        # Ielādē LAS datus
+                        lidar_gdf = load_lidar(las_file)
+                        
+                        # Atlasīt punktus, kas atrodas poligonos
+                        points_within = filter_points_within_polygons(lidar_gdf, polygons_gdf)
+                        if points_within.empty:
+                            st.warning("Nav punktu, kas atrodas poligonos.")
+                        else:
+                            # Atlasīt punktus ar attāluma ierobežojumiem
+                            filtered_points = select_points_with_constraints(points_within, min_distance, max_distance)
+                            if filtered_points.empty:
+                                st.warning("Nav punktu, kas atbilst attāluma kritērijiem.")
+                            else:
+                                # Saglabā filtrētos punktus kā shapefile zip
+                                zip_buffer = create_zip_from_gdf(filtered_points)
+                                
+                                # Piedāvā lejupielādi
+                                st.success("Filtrēšana pabeigta!")
+                                st.download_button(
+                                    label="Lejupielādēt Filtrētos Punktus (ZIP)",
+                                    data=zip_buffer,
+                                    file_name="filtered_lidar_points.zip",
+                                    mime="application/zip"
+                                )
                     except Exception as e:
-                        st.error(f"Kļūda pārveidojot CRS: {e}")
-                        st.stop()
+                        st.error(f"Kļūda apstrādājot datus: {e}")
 
-                    # Pārbaudām, vai ģeometrija ir pareiza
-                    if gdf_wgs84.geometry.is_empty.all():
-                        st.error("Visas ģeometrijas ir tukšas. Lūdzu, pārbaudiet SHP failu.")
-                        st.stop()
-
-                    # Ģenerējam punktus poligona iekšpusē
-                    st.subheader("Ģenerētie punkti poligona iekšpusē")
-
-                    # Pārvēršam atpakaļ uz EPSG:3059, lai ģenerētu punktus precīzi metriskajā sistēmā
-                    gdf_epsg3059 = gdf.to_crs(epsg=3059)
-
-                    all_points = []
-                    for idx, row in gdf_epsg3059.iterrows():
-                        geometry = row['geometry']
-                        if geometry.type == 'Polygon' or geometry.type == 'MultiPolygon':
-                            points = generate_random_points_with_min_distance(geometry, min_distance=5)
-                            all_points.extend(points)
-
-                    if not all_points:
-                        st.warning("Neizdevās ģenerēt punktus no SHP faila.")
-                    else:
-                        # Izveidojam GeoDataFrame ar punktiem EPSG:3059
-                        points_gdf_3059 = gpd.GeoDataFrame(geometry=all_points, crs="EPSG:3059")
-
-                        # Pārvēršam punktus uz EPSG:4326
-                        points_gdf_4326 = points_gdf_3059.to_crs(epsg=4326)
-
-                        st.write(f"Ģenerēto punktu skaits: {len(points_gdf_3059)}")
-                        st.write(points_gdf_3059.head())
-
-                        # Izveidojiet Folium karti
-                        # Izmantojam poligona kopējo robežu, lai noteiktu kartes centru
-                        minx, miny, maxx, maxy = gdf_wgs84.total_bounds
-                        center_x = (minx + maxx) / 2
-                        center_y = (miny + maxy) / 2
-                        m = folium.Map(location=[center_y, center_x], zoom_start=14)
-
-                        # Pievienojam poligonu
-                        folium.GeoJson(
-                            gdf_wgs84,
-                            name="Poligoni",
-                            style_function=lambda feature: {
-                                'fillColor': '#007BFF',
-                                'color': 'black',
-                                'weight': 2,
-                                'fillOpacity': 0.5,
-                            }
-                        ).add_to(m)
-
-                        # Pievienojam punktus ar MarkerCluster
-                        marker_cluster = MarkerCluster(name="Punkti").add_to(m)
-
-                        for _, point in points_gdf_4326.iterrows():
-                            folium.CircleMarker(
-                                location=[point.geometry.y, point.geometry.x],
-                                radius=2,
-                                color='red',
-                                fill=True,
-                                fill_color='red',
-                                fill_opacity=0.7,
-                                weight=1
-                            ).add_to(marker_cluster)
-
-                        folium.LayerControl().add_to(m)
-
-                        # Pievienojam karti Streamlit interfeisam
-                        st_folium(m, width=700, height=500)
-
-                        # Pievienojam lejupielādes pogu
-                        st.subheader("Lejupielādēt ģenerētos punktus")
-                        csv_buffer = convert_gdf_to_csv(points_gdf_3059)
-                        st.download_button(
-                            label="Lejupielādēt Punktus kā CSV",
-                            data=csv_buffer,
-                            file_name="punkti.csv",
-                            mime="text/csv"
-                        )
-
-            except Exception as e:
-                st.error(f"Kļūda lasot SHP failu: {e}")
+if __name__ == "__main__":
+    main()
