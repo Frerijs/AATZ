@@ -1,6 +1,9 @@
-streamlit
 geopandas
 shapely
-pyproj
-folium
-streamlit-folium
+rtree
+pandas
+laspy
+tqdm
+scipy
+numpy
+streamlit
